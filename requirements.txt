@@ -1,0 +1,6 @@
+# GeoTIFF Metadata Viewer - Zero Dependencies
+# This tool uses only Python standard library
+# No external packages required
+
+# Development dependencies (optional):
+# pytest>=7.0.0
