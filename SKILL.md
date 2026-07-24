@@ -158,3 +158,35 @@ MIT-0 (No Attribution)
 ## Author
 
 OpenCode AI Assistant
+
+---
+
+## 中文说明
+
+零依赖的 GeoTIFF 元数据读取工具。仅使用 Python 标准库，手动解析 TIFF IFD。
+
+### 特性
+
+- **CRS 信息**：EPSG 编码、CRS 名称、WKT
+- **分辨率**：X/Y 方向像元大小
+- **图像尺寸**：宽度、高度、波段数
+- **数据类型**：位深度、采样格式（整型/浮点）
+- **NoData**：GDAL nodata 标签
+- **角点坐标**：左上、右上、左下、右下
+- **仿射变换**：6 参数仿射变换矩阵
+- **批量处理**：扫描整个目录的 GeoTIFF 文件
+- **输出格式**：文本表格或 JSON
+
+### 使用方法
+
+```bash
+# 单文件
+python geotiff-info.py image.tif
+python geotiff-info.py image.tif --json
+
+# 批量扫描目录
+python geotiff-info.py /path/to/directory --batch
+python geotiff-info.py /path/to/directory --batch --json > metadata.json
+```
+
+无需安装任何依赖，直接运行即可。
