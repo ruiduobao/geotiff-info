@@ -906,10 +906,18 @@ Examples:
         sys.exit(1)
 
     if args.batch or input_path.is_dir():
-        results = scan_directory(str(input_path))
-        if not results:
-            print("No GeoTIFF files found.", file=sys.stderr)
-            sys.exit(1)
+        if args.batch and input_path.is_file():
+            # --batch with a single file: process just that file
+            try:
+                results = [read_geotiff(str(input_path))]
+            except Exception as e:
+                print(f"Error reading {args.input}: {e}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            results = scan_directory(str(input_path))
+            if not results:
+                print("No GeoTIFF files found.", file=sys.stderr)
+                sys.exit(1)
 
         if args.json:
             all_data = []
