@@ -1,12 +1,6 @@
 ---
-description: 'Zero-dependency Python tool for reading GeoTIFF file metadata.
-
-  Parses TIFF IFD manually using only Python standard library.
-
-  Supports CRS, resolution, bands, corner coordinates, and batch scanning.
-
-  '
 name: geotiff-info
+description: 'Zero-dependency Python tool for reading GeoTIFF file metadata. description: 'Zero-dependency Python tool for reading GeoTIFF file metadata.  Parses TIFF IFD manually using only Python standard library.  Supports CRS, resolution, bands, corner coordinates, and batch scanning.  '
 ---
 
 # GeoTIFF Metadata Viewer
