@@ -417,20 +417,130 @@ def test_corner_coordinates_calculation(tmp_path):
     """Test corner coordinate calculation accuracy."""
     tif_file = tmp_path / "corners.tif"
     create_test_geotiff(str(tif_file), width=100, height=100)
-    
+
     info = read_geotiff(str(tif_file))
-    
+
     a, b, c, d, e, f = info.affine_transform
     w, h = info.width, info.height
-    
+
     # Upper Left
     assert info.corner_coords["Upper Left"] == (c, f)
-    
+
     # Upper Right
     assert info.corner_coords["Upper Right"] == (a * w + c, b * w + f)
-    
+
     # Lower Left
     assert info.corner_coords["Lower Left"] == (d * h + c, e * h + f)
-    
+
     # Lower Right
     assert info.corner_coords["Lower Right"] == (a * w + d * h + c, b * w + e * h + f)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — --format {text,json} flag
+# ---------------------------------------------------------------------------
+
+import subprocess
+
+
+def _cli(*args, cwd=None):
+    """Run geotiff-info.py and return (returncode, stdout, stderr)."""
+    skill_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    script = os.path.join(skill_root, "geotiff-info.py")
+    cmd = [sys.executable, script] + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=cwd)
+
+
+def test_help_lists_format_flag():
+    """`--help` should advertise the --format {text,json} flag."""
+    proc = _cli("--help")
+    assert proc.returncode == 0
+    assert "--format" in (proc.stdout + proc.stderr)
+    # The choices should be visible
+    combined = proc.stdout + proc.stderr
+    assert "text" in combined
+    assert "json" in combined
+
+
+def test_default_format_is_text(tmp_path):
+    """Without any flag, output should be the human-readable text table."""
+    tif = tmp_path / "default.tif"
+    create_test_geotiff(str(tif))
+    proc = _cli(str(tif))
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+    out = proc.stdout
+    # text table contains section headers
+    assert "GeoTIFF Metadata" in out
+    assert "FILE INFORMATION" in out
+    # and is NOT valid JSON top-level (no leading `{`)
+    assert not out.lstrip().startswith("{")
+
+
+def test_format_text_explicit(tmp_path):
+    """`--format text` should match the default (human-readable)."""
+    tif = tmp_path / "fmt_text.tif"
+    create_test_geotiff(str(tif))
+    proc = _cli(str(tif), "--format", "text")
+    assert proc.returncode == 0
+    out = proc.stdout
+    assert "GeoTIFF Metadata" in out
+    assert "FILE INFORMATION" in out
+    assert not out.lstrip().startswith("{")
+
+
+def test_format_json_explicit(tmp_path):
+    """`--format json` should produce parseable JSON."""
+    tif = tmp_path / "fmt_json.tif"
+    create_test_geotiff(str(tif))
+    proc = _cli(str(tif), "--format", "json")
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+    out = proc.stdout
+    data = json.loads(out)
+    assert data["is_geotiff"] is True
+    assert "width" in data and "height" in data
+    # The human-readable header should NOT appear in JSON mode
+    assert "FILE INFORMATION" not in out
+
+
+def test_format_alias_json_flag_still_works(tmp_path):
+    """`--json` (legacy flag) should still produce JSON output."""
+    tif = tmp_path / "legacy_json.tif"
+    create_test_geotiff(str(tif))
+    proc = _cli(str(tif), "--json")
+    assert proc.returncode == 0
+    out = proc.stdout
+    data = json.loads(out)
+    assert data["is_geotiff"] is True
+
+
+def test_format_overrides_legacy_json_flag(tmp_path):
+    """`--json --format text` should output text (--format wins)."""
+    tif = tmp_path / "over.tif"
+    create_test_geotiff(str(tif))
+    proc = _cli(str(tif), "--json", "--format", "text")
+    assert proc.returncode == 0
+    out = proc.stdout
+    # text format, NOT JSON
+    assert "FILE INFORMATION" in out
+    assert not out.lstrip().startswith("{")
+
+
+def test_format_rejects_invalid_choice(tmp_path):
+    """`--format yaml` should be rejected by argparse."""
+    tif = tmp_path / "bad_fmt.tif"
+    create_test_geotiff(str(tif))
+    proc = _cli(str(tif), "--format", "yaml")
+    # argparse exits 2 on invalid choice
+    assert proc.returncode != 0
+
+
+def test_format_json_in_batch_mode(tmp_path):
+    """`--batch --format json` on a directory should produce a JSON array."""
+    tif = tmp_path / "batch_fmt.tif"
+    create_test_geotiff(str(tif))
+    proc = _cli(str(tmp_path), "--batch", "--format", "json")
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+    data = json.loads(proc.stdout)
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    assert data[0]["is_geotiff"] is True

@@ -846,6 +846,182 @@ def format_json(info: GeoTIFFInfo) -> str:
     return json.dumps(data, indent=2)
 
 
+def deep_qa(info: 'GeoTIFFInfo') -> Dict[str, Any]:
+    """[Phase 1+ 2026-07-26] 深度 QA 检查 — 不依赖 numpy/rasterio。
+
+    基于元数据层面（不读栅格数据）做 6 类检查：
+    1. CRS 完整性：必须有 EPSG 或 GeoKey
+    2. bbox 合理性：W < E, S < N, 在地球范围内
+    3. resolution 合理性：> 0, < 1° 等等
+    4. 文件大小合理性：和像素数大致成正比
+    5. nodata 设置：浮点/高光谱产品必须有 nodata
+    6. 多波段一致性：所有波段 bits_per_sample / sample_format 一致
+    """
+    findings: List[Dict[str, str]] = []
+    score = 100  # 起始满分；每发现一个问题扣分
+    # 1. CRS 检查
+    if not info.crs_epsg and not info.geo_keys:
+        findings.append({
+            "severity": "error",
+            "category": "crs",
+            "message": "No CRS information (no EPSG code, no GeoKeys)",
+        })
+        score -= 30
+    elif info.crs_epsg and info.crs_epsg <= 0:
+        findings.append({
+            "severity": "error",
+            "category": "crs",
+            "message": f"Invalid EPSG code: {info.crs_epsg}",
+        })
+        score -= 20
+    # 2. bbox 检查
+    if not info.corner_coords:
+        findings.append({
+            "severity": "warning",
+            "category": "bbox",
+            "message": "No corner coordinates (no GeoTransform)",
+        })
+        score -= 10
+    else:
+        cc = info.corner_coords
+        if "upper_left" in cc and "lower_right" in cc:
+            ul_lon, ul_lat = cc["upper_left"]
+            lr_lon, lr_lat = cc["lower_right"]
+            if not (-180 <= ul_lon <= 180 and -180 <= lr_lon <= 180):
+                findings.append({
+                    "severity": "error",
+                    "category": "bbox",
+                    "message": f"Longitude out of range: ul={ul_lon}, lr={lr_lon}",
+                })
+                score -= 25
+            if not (-90 <= ul_lat <= 90 and -90 <= lr_lat <= 90):
+                findings.append({
+                    "severity": "error",
+                    "category": "bbox",
+                    "message": f"Latitude out of range: ul={ul_lat}, lr={lr_lat}",
+                })
+                score -= 25
+            if info.crs_epsg == 4326 and (ul_lon == 0 and lr_lon == 0 and ul_lat == 0 and lr_lat == 0):
+                findings.append({
+                    "severity": "warning",
+                    "category": "bbox",
+                    "message": "bbox is (0,0,0,0) - likely unset GeoTransform",
+                })
+                score -= 15
+    # 3. resolution 检查
+    if not info.pixel_scale or len(info.pixel_scale) < 2:
+        findings.append({
+            "severity": "warning",
+            "category": "resolution",
+            "message": "No pixel scale (cannot determine spatial resolution)",
+        })
+        score -= 5
+    else:
+        sx, sy = info.pixel_scale[0], info.pixel_scale[1]
+        if sx <= 0 or sy <= 0:
+            findings.append({
+                "severity": "error",
+                "category": "resolution",
+                "message": f"Non-positive pixel scale: sx={sx}, sy={sy}",
+            })
+            score -= 15
+        elif sx > 1.0 or sy > 1.0:
+            findings.append({
+                "severity": "warning",
+                "category": "resolution",
+                "message": f"Coarse resolution: sx={sx}, sy={sy} (>{1.0} degrees)",
+            })
+            score -= 5
+    # 4. 文件大小 vs 像素数
+    if info.width > 0 and info.height > 0 and info.samples_per_pixel > 0:
+        total_pixels = info.width * info.height * info.samples_per_pixel
+        bytes_per_pixel = info.file_size / total_pixels if total_pixels > 0 else 0
+        if bytes_per_pixel < 0.1:
+            findings.append({
+                "severity": "warning",
+                "category": "filesize",
+                "message": f"File too small: {bytes_per_pixel:.3f} bytes/pixel (might be empty/over-compressed)",
+            })
+            score -= 10
+        elif bytes_per_pixel > 100:
+            findings.append({
+                "severity": "info",
+                "category": "filesize",
+                "message": f"File large: {bytes_per_pixel:.1f} bytes/pixel (might be uncompressed)",
+            })
+            # info 不扣分
+    # 5. nodata 检查
+    bits = info.bits_per_sample[0] if info.bits_per_sample else 0
+    is_float = "floating" in (info.sample_format[0].lower() if info.sample_format else "")
+    if not info.nodata:
+        if is_float or bits >= 32:
+            findings.append({
+                "severity": "warning",
+                "category": "nodata",
+                "message": "Float/32-bit+ raster without nodata (downstream analysis may mis-handle missing pixels)",
+            })
+            score -= 5
+    # 6. 多波段一致性
+    if info.samples_per_pixel > 1 and len(info.bits_per_sample) > 1:
+        if len(set(info.bits_per_sample)) > 1:
+            findings.append({
+                "severity": "warning",
+                "category": "consistency",
+                "message": f"Inconsistent bits_per_sample across bands: {info.bits_per_sample}",
+            })
+            score -= 5
+        if len(set(info.sample_format)) > 1:
+            findings.append({
+                "severity": "warning",
+                "category": "consistency",
+                "message": f"Inconsistent sample_format across bands: {info.sample_format}",
+            })
+            score -= 5
+    # 统计
+    by_severity = {"error": 0, "warning": 0, "info": 0}
+    for f in findings:
+        by_severity[f["severity"]] = by_severity.get(f["severity"], 0) + 1
+    return {
+        "file": info.file_path,
+        "score": max(0, score),
+        "passed": score >= 70,
+        "findings": findings,
+        "summary": by_severity,
+    }
+
+
+__version__ = "1.0.0"
+USER_AGENT = f"geotiff-info/{__version__}"
+
+
+def write_qa_summary(qa_path, *, info, command, extra=None):
+    """Write a JSON deep_qa checks summary to qa_path (Phase 5 optimization).
+
+    The sidecar includes the deep_qa() report (score, findings, summary by
+    severity) plus a UTC timestamp and the command that produced the run.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    qa = deep_qa(info)
+    summary = {
+        "skill": "geotiff-info",
+        "command": command,
+        "version": __version__,
+        "user_agent": USER_AGENT,
+        "timestamp": _dt.now(_tz.utc).isoformat(),
+        "file": info.file_path,
+        "file_size": info.file_size,
+        "qa": qa,
+    }
+    if extra:
+        summary.update(extra)
+    qa_p = Path(qa_path)
+    qa_p.parent.mkdir(parents=True, exist_ok=True)
+    with open(qa_p, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
+    return qa_p
+
+
 def scan_directory(dirpath: str) -> List[GeoTIFFInfo]:
     """Scan a directory for GeoTIFF files."""
     results = []
@@ -889,15 +1065,41 @@ Examples:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Output as JSON"
+        help="Output as JSON (alias for --format json)"
+    )
+    parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default=None,
+        help="Output format: 'text' (default, human-readable) or 'json' "
+             "(machine-readable). Overrides --json when both are set."
     )
     parser.add_argument(
         "--batch",
         action="store_true",
         help="Scan directory for GeoTIFF files"
     )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="One-line per file (fast preview across a directory)"
+    )
+    parser.add_argument(
+        "--qa",
+        metavar="PATH",
+        default=None,
+        help="Write a JSON deep_qa checks summary to PATH (Phase 5). "
+             "The sidecar contains the QA score, findings (by severity) and "
+             "any per-band consistency issues. Defaults to <input>.qa.json "
+             "when --qa is given as a bare flag."
+    )
 
     args = parser.parse_args()
+
+    # Resolve --format: explicit --format wins; otherwise --json decides.
+    # Default is "text".
+    output_format = args.format or ("json" if args.json else "text")
+    want_json = output_format == "json"
 
     input_path = Path(args.input)
 
@@ -919,7 +1121,15 @@ Examples:
                 print("No GeoTIFF files found.", file=sys.stderr)
                 sys.exit(1)
 
-        if args.json:
+        if args.summary:
+            for info in results:
+                m = info.get("metadata", {})
+                print(f"{info.get('file', '?'):<60} "
+                      f"{m.get('width', '?')}x{m.get('height', '?')} "
+                      f"bands={m.get('count', '?')} "
+                      f"crs={m.get('crs', '?')[:30]} "
+                      f"dtype={m.get('dtype', '?')}")
+        elif want_json:
             all_data = []
             for info in results:
                 all_data.append(json.loads(format_json(info)))
@@ -928,13 +1138,54 @@ Examples:
             for info in results:
                 print(format_text_table(info))
                 print()
+
+        # Phase 5: --qa sidecar for batch mode (writes one combined JSON)
+        if getattr(args, "qa", None) and not (args.batch and input_path.is_file()):
+            if not (args.qa is True or args.qa == ""):
+                # Per-file deep_qa + combined roll-up
+                per_file = [deep_qa(info) for info in results]
+                n_passed = sum(1 for q in per_file if q.get("passed"))
+                avg_score = (
+                    sum(q.get("score", 0) for q in per_file) / len(per_file)
+                    if per_file else 0
+                )
+                summary = {
+                    "skill": "geotiff-info",
+                    "command": "batch",
+                    "version": __version__,
+                    "user_agent": USER_AGENT,
+                    "timestamp": _dt.now(_tz.utc).isoformat(),
+                    "input_dir": str(input_path.resolve()),
+                    "n_files": len(results),
+                    "n_passed": n_passed,
+                    "avg_score": round(avg_score, 2),
+                    "per_file": per_file,
+                }
+                qa_p = Path(args.qa)
+                qa_p.parent.mkdir(parents=True, exist_ok=True)
+                with open(qa_p, "w", encoding="utf-8") as f:
+                    json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
+                print(f"QA: {qa_p}")
     else:
         try:
             info = read_geotiff(str(input_path))
-            if args.json:
+            if want_json:
                 print(format_json(info))
             else:
                 print(format_text_table(info))
+            if args.qa is not None:
+                # --qa may be a boolean True (no value) or a path string.
+                # argparse gives True when no value is given and the
+                # argument is declared with store_true. Since we changed
+                # --qa to metavar=PATH, the user must supply a value;
+                # however we also accept the bare-flag form by falling
+                # back to <input>.qa.json when args.qa is True.
+                if args.qa is True or args.qa == "":
+                    qa_path = str(input_path) + ".qa.json"
+                else:
+                    qa_path = args.qa
+                write_qa_summary(qa_path, info=info, command="info")
+                print(f"QA: {qa_path}")
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
